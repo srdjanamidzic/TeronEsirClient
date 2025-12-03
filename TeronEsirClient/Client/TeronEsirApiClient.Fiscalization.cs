@@ -1,11 +1,16 @@
-﻿using System.Threading.Tasks;
-using TeronEsirClient.Models;
-using TeronEsirClient.Enums;
-using TeronEsirClient.Enums.Utils;
+﻿using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Linq;
-using TeronEsirClient.Models.Fiscalization.Write;
+using System.Net.Http;
+using System.Threading.Tasks;
+using TeronEsirClient.Enums;
+using TeronEsirClient.Enums.Utils;
+using TeronEsirClient.Json;
+using TeronEsirClient.Models;
 using TeronEsirClient.Models.Fiscalization.Read;
+using TeronEsirClient.Models.Fiscalization.Write;
 
 namespace TeronEsirClient.Client
 {
@@ -62,12 +67,13 @@ namespace TeronEsirClient.Client
             var requestMessage = CreatePostRequestMessage(apiParameters, "invoices", invoice);
             if (!string.IsNullOrWhiteSpace(requestId))
             {
+                ThrowIfInvalidRequestId(requestId);
                 requestMessage.Headers.Add("RequestId", requestId);
             }
 
             var response = await _httpClient.SendAsync(requestMessage);
 
-            return await TeronEsirResult<TeronEsirInvoiceResponse>.FromHttpResponseAsync(response);
+            return await CreateIssueInvoiceResultFromHttpResponseAsync(response);
         }
 
         public async Task<TeronEsirResult<TeronEsirInvoiceResponse>> IssueFinalInvoiceAsync(TeronEsirFinalInvoice finalInvoice, string requestId = null)
@@ -80,12 +86,13 @@ namespace TeronEsirClient.Client
             var requestMessage = CreatePostRequestMessage(apiParameters, "invoices/final", finalInvoice);
             if (!string.IsNullOrWhiteSpace(requestId))
             {
+                ThrowIfInvalidRequestId(requestId);
                 requestMessage.Headers.Add("RequestId", requestId);
             }
 
             var response = await _httpClient.SendAsync(requestMessage);
 
-            return await TeronEsirResult<TeronEsirInvoiceResponse>.FromHttpResponseAsync(response);
+            return await CreateIssueInvoiceResultFromHttpResponseAsync(response);
         }
 
         public async Task<TeronEsirResult<TeronEsirInvoiceContents>> GetInvoiceContentsAsync(string invoiceNumber, ReceiptLayout receiptLayout, ReceiptImageFormat receiptImageFormat, bool includeHeaderAndFooter)
@@ -160,12 +167,64 @@ namespace TeronEsirClient.Client
             {
                 return TeronEsirResult<TeronEsirInvoiceSearchResult[]>.Success(new TeronEsirInvoiceSearchResult[] { }, responseContent);
             }
-            
+
             var results = responseContent.Split('\n')
                 .Select(a => TeronEsirInvoiceSearchResult.FromCsvString(a))
                 .ToArray();
 
             return TeronEsirResult<TeronEsirInvoiceSearchResult[]>.Success(results, responseContent);
+        }
+
+        private static async Task<TeronEsirResult<TeronEsirInvoiceResponse>> CreateIssueInvoiceResultFromHttpResponseAsync(HttpResponseMessage httpResponseMessage)
+        {
+            var responseContent = await httpResponseMessage.Content.ReadAsStringAsync();
+
+            if (httpResponseMessage.IsSuccessStatusCode)
+            {
+                TeronEsirInvoiceResponse value = JsonConvert.DeserializeObject<TeronEsirInvoiceResponse>(
+                    responseContent,
+                    GlobalJsonSerializerSettings.Settings);
+
+                return TeronEsirResult<TeronEsirInvoiceResponse>.Success(value, responseContent);
+            }
+
+            string message = string.Empty;
+            try
+            {
+                Dictionary<string, JToken> responseFieldDict = JsonConvert.DeserializeObject<Dictionary<string, JToken>>(responseContent);
+
+                if (responseFieldDict.TryGetValue(nameof(TeronEsirError.Message).ToLower(), out JToken deserializedMessage))
+                {
+                    message = deserializedMessage.ToString();
+                }
+
+                if (responseFieldDict.TryGetValue("invoiceResponse", out JToken invoiceResponse))
+                {
+                    TeronEsirInvoiceResponse value = invoiceResponse.ToObject<TeronEsirInvoiceResponse>(JsonSerializer.Create(GlobalJsonSerializerSettings.Settings));
+                    return TeronEsirResult<TeronEsirInvoiceResponse>.Fail(message, responseContent, value);
+                }
+            }
+            catch (JsonSerializationException)
+            {
+                message = httpResponseMessage.ReasonPhrase;
+            }
+
+            return TeronEsirResult<TeronEsirInvoiceResponse>.Fail(message, responseContent);
+        }
+
+        private void ThrowIfInvalidRequestId(string requestId)
+        {
+            const int maxRequestIdLength = 32;
+
+            if (requestId != null && requestId.Length > maxRequestIdLength)
+            {
+                throw new System.ArgumentException($"RequestId cannot be longer than {maxRequestIdLength} characters.", nameof(requestId));
+            }
+
+            if (requestId.Any(a => !char.IsLetterOrDigit(a)))
+            {
+                throw new System.ArgumentException("RequestId can only contain alphanumeric characters.", nameof(requestId));
+            }
         }
     }
 }
